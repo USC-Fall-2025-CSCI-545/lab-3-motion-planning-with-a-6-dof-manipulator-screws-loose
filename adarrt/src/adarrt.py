@@ -45,7 +45,7 @@ class AdaRRT():
             """
             Adds a new child at the given state.
 
-            :param state: np.array of new child node's statee
+            :param state: np.array of new child node's state
             :returns: child Node object.
             """
             child = AdaRRT.Node(state=state, parent=self)
@@ -60,7 +60,7 @@ class AdaRRT():
                  joint_upper_limits=None,
                  ada_collision_constraint=None,
                  step_size=0.25,
-                 goal_precision=1.0,
+                 goal_precision=0.2,   # Q5: epsilon reduced from 1.0 to 0.2
                  max_iter=10000):
         """
         :param start_state: Array representing the starting state.
@@ -72,8 +72,6 @@ class AdaRRT():
         :param step_size: Distance between nodes in the RRT.
         :param goal_precision: Maximum distance between RRT and goal before
             declaring completion.
-        :param sample_near_goal_prob:
-        :param sample_near_goal_range:
         :param max_iter: Maximum number of iterations to run the RRT before
             failure.
         """
@@ -92,10 +90,10 @@ class AdaRRT():
         Build an RRT.
 
         In each step of the RRT:
-            1. Sample a random point.
+            1. Sample a random point (sometimes near the goal).
             2. Find its nearest neighbor.
             3. Attempt to create a new node in the direction of sample from its
-                nearest neighbor.
+               nearest neighbor.
             4. If we have created a new node, check for completion.
 
         Once the RRT is complete, add the goal node to the RRT and build a path
@@ -105,11 +103,26 @@ class AdaRRT():
             goal on success. On failure, returns None.
         """
         for k in range(self.max_iter):
-            # FILL in your code here
+            # Q5: 80% global sampling, 20% goal-biased sampling
+            if np.random.rand() < 0.2:
+                sample = self._get_random_sample_near_goal()
+            else:
+                sample = self._get_random_sample()
 
+            # 2) Find nearest node in the existing tree
+            neighbor = self._get_nearest_neighbor(sample)
+
+            # 3) Try to extend from neighbor toward the sample
+            new_node = self._extend_sample(sample, neighbor)
+
+            # 4) If a new node was created, check whether we are close to the goal
             if new_node and self._check_for_completion(new_node):
-                # FILL in your code here
+                # Attach the goal node to the tree
+                self.goal.parent = new_node
+                new_node.children.append(self.goal)
 
+                # Build and return the state path from start to goal
+                path = self._trace_path_from_start(self.goal)
                 return path
 
         print("Failed to find path from {0} to {1} after {2} iterations!".format(
@@ -122,7 +135,18 @@ class AdaRRT():
         :returns: A vector representing a randomly sampled point in the search
             space.
         """
-        # FILL in your code here
+        # Sample each joint uniformly between its lower and upper limits
+        return np.random.uniform(self.joint_lower_limits,
+                                 self.joint_upper_limits)
+
+    def _get_random_sample_near_goal(self):
+        """
+        Q5: Uniformly sample within 0.05 of the goal along each joint axis,
+        clamped to the joint limits.
+        """
+        low = np.maximum(self.goal.state - 0.05, self.joint_lower_limits)
+        high = np.minimum(self.goal.state + 0.05, self.joint_upper_limits)
+        return np.random.uniform(low, high)
 
     def _get_nearest_neighbor(self, sample):
         """
@@ -132,7 +156,21 @@ class AdaRRT():
         :param sample: The target point to find the closest neighbor to.
         :returns: A Node object for the closest neighbor.
         """
-        # FILL in your code here
+        best_node = None
+        best_dist = float('inf')
+
+        # Iterate over all nodes starting from the root (start)
+        for node in self.start:
+            # We don't expect the goal to be in the tree yet, but just in case:
+            if node is self.goal:
+                continue
+
+            dist = np.linalg.norm(sample - node.state)
+            if dist < best_dist:
+                best_dist = dist
+                best_node = node
+
+        return best_node
 
     def _extend_sample(self, sample, neighbor):
         """
@@ -145,7 +183,24 @@ class AdaRRT():
         :param neighbor: closest existing node to sample
         :returns: The new Node object. On failure (collision), returns None.
         """
-        # FILL in your code here
+        direction = sample - neighbor.state
+        dist = np.linalg.norm(direction)
+
+        # If the sample is exactly at the neighbor, no extension
+        if dist == 0.0:
+            return None
+
+        # Take a step of length min(step_size, dist) toward the sample
+        step = min(self.step_size, dist)
+        new_state = neighbor.state + (step / dist) * direction
+
+        # Check for collision at the new configuration
+        if self._check_for_collision(new_state):
+            return None
+
+        # Create child node and attach to the tree
+        new_node = neighbor.add_child(new_state)
+        return new_node
 
     def _check_for_completion(self, node):
         """
@@ -154,7 +209,8 @@ class AdaRRT():
         :param node: The target Node
         :returns: Boolean indicating node is close enough for completion.
         """
-        # FILL in your code here
+        dist_to_goal = np.linalg.norm(node.state - self.goal.state)
+        return dist_to_goal <= self.goal_precision
 
     def _trace_path_from_start(self, node=None):
         """
@@ -165,7 +221,18 @@ class AdaRRT():
         :returns: A list of states (not Nodes!) beginning at the start state and
             ending at the goal state.
         """
-        # FILL in your code here
+        if node is None:
+            node = self.goal
+
+        states = []
+        current = node
+        while current is not None:
+            states.append(current.state)
+            current = current.parent
+
+        # We walked from goal back to start, so reverse
+        states.reverse()
+        return states
 
     def _check_for_collision(self, sample):
         """
@@ -181,7 +248,7 @@ class AdaRRT():
 
 
 def main(is_sim):
-    
+
     if not is_sim:
         from moveit_ros_planning_interface._moveit_roscpp_initializer import roscpp_init
         roscpp_init('adarrt', [])
@@ -192,14 +259,13 @@ def main(is_sim):
     armHome = [-1.5, 3.22, 1.23, -2.19, 1.8, 1.2]
     goalConfig = [-1.72, 4.44, 2.02, -2.04, 2.66, 1.39]
     delta = 0.25
-    eps = 1.0
+    eps = 0.2  # Q5: smaller goal tolerance
 
     if is_sim:
         ada.set_positions(goalConfig)
     else:
         raw_input("Please move arm to home position with the joystick. " +
-            "Press ENTER to continue...")
-
+                  "Press ENTER to continue...")
 
     # launch viewer
     viewer = ada.start_viewer("dart_markers/simple_trajectories", "map")
@@ -215,15 +281,15 @@ def main(is_sim):
 
     # add collision constraints
     collision_free_constraint = ada.set_up_collision_detection(
-            ada.get_arm_state_space(),
-            ada.get_arm_skeleton(),
-            [can, table])
+        ada.get_arm_state_space(),
+        ada.get_arm_skeleton(),
+        [can, table])
     full_collision_constraint = ada.get_full_collision_constraint(
-            ada.get_arm_state_space(),
-            ada.get_arm_skeleton(),
-            collision_free_constraint)
+        ada.get_arm_state_space(),
+        ada.get_arm_skeleton(),
+        collision_free_constraint)
 
-    # easy goal
+    # RRT with goal-biased sampling
     adaRRT = AdaRRT(
         start_state=np.array(armHome),
         goal_state=np.array(goalConfig),
@@ -246,13 +312,15 @@ def main(is_sim):
             waypoints.append((0.0 + i, waypoint))
 
         t0 = time.clock()
-        traj = ada.compute_joint_space_path(
+        # Q4/Q5: use smooth joint space path
+        traj = ada.compute_smooth_joint_space_path(
             ada.get_arm_state_space(), waypoints)
         t = time.clock() - t0
-        print(str(t) + "seconds elapsed")
+        print(str(t) + " seconds elapsed")
         raw_input('Press ENTER to execute trajectory and exit')
         ada.execute_trajectory(traj)
         rospy.sleep(1.0)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
